@@ -42,9 +42,10 @@ type Room struct {
 	Trick   []Card
 	TrickBy []int
 
-	Turn    int // current seat to act
-	Started bool
-	Trump   string // "A","L","H","B"
+	Turn     int    // current seat to act
+	Started  bool   // hand in progress
+	HandOver bool   // hand finished (all hands empty)
+	Trump    string // "A","L","H","B"
 }
 
 type Hub struct {
@@ -55,6 +56,10 @@ type Hub struct {
 
 	roomsMu sync.RWMutex
 	rooms   map[string]*Room
+
+	// player names: clientID -> display name
+	namesMu sync.RWMutex
+	names   map[string]string
 }
 
 func NewHub(allow []string) *Hub {
@@ -69,6 +74,7 @@ func NewHub(allow []string) *Hub {
 		clients:      map[*Client]struct{}{},
 		broadcast:    make(chan []byte, 256),
 		rooms:        map[string]*Room{},
+		names:        map[string]string{},
 	}
 }
 
@@ -135,6 +141,26 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch m.T {
+
+		// ---- Identity ----
+
+		case "set_name":
+			name, _ := m.M["name"].(string)
+			if name != "" {
+				h.namesMu.Lock()
+				h.names[client.id] = name
+				h.namesMu.Unlock()
+				// update any seated table states to show names
+				h.roomsMu.RLock()
+				for _, room := range h.rooms {
+					for _, id := range room.PlayerIDs {
+						if id == client.id {
+							h.sendStateToRoom(room)
+						}
+					}
+				}
+				h.roomsMu.RUnlock()
+			}
 
 		// ---- Lobby API ----
 
@@ -205,7 +231,6 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				for i := 0; i < room.Seats; i++ {
 					if room.PlayerIDs[i] == client.id {
 						room.PlayerIDs[i] = ""
-						// if table empties completely, we could delete it (keep for now)
 					}
 				}
 			}
@@ -224,6 +249,23 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				h.sendState(client, room, seat)
 			}
 
+		case "new_hand":
+			roomID, _ := m.M["room"].(string)
+			h.roomsMu.Lock()
+			if room, ok := h.rooms[roomID]; ok {
+				// allow redeal only if not in the middle of a trick
+				if !room.Started || room.HandOver || len(room.Trick) == 0 {
+					deal(room)
+				}
+			}
+			h.roomsMu.Unlock()
+			h.roomsMu.RLock()
+			room := h.rooms[roomID]
+			h.roomsMu.RUnlock()
+			if room != nil {
+				h.sendStateToRoom(room)
+			}
+
 		case "move":
 			// m.M: room, seat, type="play_card", card:{Suit,Rank}
 			roomID, _ := m.M["room"].(string)
@@ -236,13 +278,13 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			var ok bool
 			h.roomsMu.Lock()
 			room, ok = h.rooms[roomID]
-			if ok && room.Started && seat == room.Turn && typ == "play_card" {
+			if ok && room.Started && !room.HandOver && seat == room.Turn && typ == "play_card" {
 				// must own the card
 				hand := room.Hands[seat]
 				// enforce must-follow if not leading
 				if len(room.Trick) > 0 && hasSuit(hand, room.Lead, room.Trump) {
 					if !followsSuit(c, room.Lead, room.Trump) {
-						// illegal -> ignore
+						// illegal -> ignore move
 						h.roomsMu.Unlock()
 						break
 					}
@@ -269,6 +311,19 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 						room.Lead = ""
 						// winner leads next trick
 						room.Turn = winner
+
+						// hand over? (all hands empty)
+						empty := true
+						for s := 0; s < room.Seats; s++ {
+							if len(room.Hands[s]) > 0 {
+								empty = false
+								break
+							}
+						}
+						if empty {
+							room.HandOver = true
+							room.Started = false
+						}
 					} else {
 						room.Turn = (room.Turn + 1) % room.Seats
 					}
@@ -286,7 +341,13 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			if roomID == "" || text == "" {
 				break
 			}
-			msg := Msg{T: "chat", M: map[string]interface{}{"room": roomID, "from": client.id, "text": text}}
+			// lookup sender name
+			h.namesMu.RLock()
+			name := h.names[client.id]
+			h.namesMu.RUnlock()
+			msg := Msg{T: "chat", M: map[string]interface{}{
+				"room": roomID, "from": client.id, "from_name": name, "text": text,
+			}}
 			h.sendMsgToRoom(roomID, msg)
 
 		case "join":
@@ -455,6 +516,7 @@ func deal(r *Room) {
 	r.Trick, r.TrickBy, r.Lead = nil, nil, ""
 	r.Turn = 0
 	r.Started = true
+	r.HandOver = false
 	r.Trump = "H" // default; bidding later
 }
 
@@ -538,10 +600,23 @@ func trickWinner(trick []Card, by []int, trump, lead string) int {
 }
 
 func (h *Hub) sendState(c *Client, r *Room, seat int) {
+	// seat name resolution
+	names := make([]string, r.Seats)
+	h.namesMu.RLock()
+	for i := 0; i < r.Seats; i++ {
+		id := r.PlayerIDs[i]
+		if id != "" {
+			names[i] = h.names[id]
+		}
+	}
+	h.namesMu.RUnlock()
+
+	// hand counts
 	counts := make([]int, r.Seats)
 	for s := 0; s < r.Seats; s++ {
 		counts[s] = len(r.Hands[s])
 	}
+
 	// publish current trick for UI
 	trick := make([]map[string]interface{}, len(r.Trick))
 	for i := range r.Trick {
@@ -556,7 +631,8 @@ func (h *Hub) sendState(c *Client, r *Room, seat int) {
 		M: map[string]interface{}{
 			"room": r.ID, "seat": seat, "turn": r.Turn, "trump": r.Trump,
 			"you": r.Hands[seat], "counts": counts, "started": r.Started,
-			"lead": r.Lead, "trick": trick,
+			"lead": r.Lead, "trick": trick, "handOver": r.HandOver,
+			"names": names,
 		},
 	}
 	h.sendTo(c, msg)
