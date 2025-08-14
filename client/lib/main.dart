@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'ws_service.dart';
 
@@ -17,16 +18,9 @@ class _AppRootState extends State<AppRoot> {
   final nameCtrl = TextEditingController(text: '');
 
   @override
-  void initState() {
-    super.initState();
-    ws.connect();
-  }
-
+  void initState() { super.initState(); ws.connect(); }
   @override
-  void dispose() {
-    nameCtrl.dispose();
-    super.dispose();
-  }
+  void dispose() { nameCtrl.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
@@ -105,7 +99,7 @@ class _LobbyPageState extends State<LobbyPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Name field
+          // Name
           Row(children: [
             SizedBox(
               width: 260,
@@ -121,7 +115,7 @@ class _LobbyPageState extends State<LobbyPage> {
             OutlinedButton(onPressed: _applyName, child: const Text('Set name')),
           ]),
           const SizedBox(height: 12),
-
+          // Create / Join
           Wrap(spacing: 8, runSpacing: 8, children: [
             FilledButton(onPressed: _create, child: const Text('Create table (3)')),
             SizedBox(
@@ -191,6 +185,7 @@ class _TablePageState extends State<TablePage> {
   List<dynamic> hand = [];
   List<Map<String, dynamic>> trick = [];
   List<String> names = [];
+  List<int> counts = [];
 
   final chat = <String>[];
   final chatCtrl = TextEditingController();
@@ -207,13 +202,14 @@ class _TablePageState extends State<TablePage> {
               seat = (m['m']['seat'] as num).toInt();
               turn = (m['m']['turn'] as num).toInt();
               trump = m['m']['trump'] as String?;
-              lead = m['m']['lead'] as String?;
+              lead  = m['m']['lead'] as String?;
               handOver = (m['m']['handOver'] ?? false) as bool;
               hand = List<dynamic>.from(m['m']['you'] as List? ?? const []);
               trick = ((m['m']['trick'] as List?) ?? const [])
                   .map((e) => Map<String, dynamic>.from((e as Map).map((k, v) => MapEntry(k.toString(), v))))
                   .toList();
               names = ((m['m']['names'] as List?) ?? const []).map((e) => (e ?? '').toString()).toList();
+              counts = ((m['m']['counts'] as List?) ?? const []).map((e) => (e as num).toInt()).toList();
             });
           }
           break;
@@ -251,15 +247,19 @@ class _TablePageState extends State<TablePage> {
   @override
   Widget build(BuildContext context) {
     final myTurn = seat != null && turn != null && seat == turn;
+    final occ = counts.where((c) => c > 0).length;
+    final seats = counts.isNotEmpty ? counts.length : math.max(names.length, 0);
+
     return Scaffold(
       appBar: AppBar(
         title: Text('Table — ${widget.roomId}'),
         leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: _leave),
         actions: [
-          if (handOver) Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: FilledButton(onPressed: _newHand, child: const Text('New hand')),
-          ),
+          if (handOver)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: FilledButton(onPressed: _newHand, child: const Text('New hand')),
+            ),
         ],
       ),
       body: Padding(
@@ -269,8 +269,22 @@ class _TablePageState extends State<TablePage> {
           children: [
             Text('Seat: ${seat ?? "-"}  |  Turn: ${turn ?? "-"}  |  Trump: ${trump ?? "-"}  |  Lead: ${lead ?? "-"}'),
             const SizedBox(height: 4),
-            if (names.isNotEmpty)
-              Text('Players: ${names.asMap().entries.map((e) => "s${e.key}:${e.value.isEmpty ? '—' : e.value}").join("  ")}'),
+            Text(occ >= 2 ? 'Players seated: $occ/${seats > 0 ? seats : "-"}'
+                          : 'Waiting for players…'),
+            const SizedBox(height: 12),
+
+            // Seating diagram
+            SizedBox(
+              height: 280,
+              child: PlayerRing(
+                seats: seats > 0 ? seats : 3,
+                names: names,
+                counts: counts,
+                youSeat: seat,
+                turnSeat: turn,
+              ),
+            ),
+
             const Divider(),
             const Text('On table (current trick):'),
             Wrap(
@@ -336,5 +350,92 @@ class _TablePageState extends State<TablePage> {
         ),
       ),
     );
+  }
+}
+
+// -------------------- PlayerRing widget --------------------
+
+class PlayerRing extends StatelessWidget {
+  final int seats;
+  final List<String> names;   // same length or shorter; missing => ""
+  final List<int> counts;     // same length or shorter; missing => 0
+  final int? youSeat;
+  final int? turnSeat;
+
+  const PlayerRing({
+    super.key,
+    required this.seats,
+    required this.names,
+    required this.counts,
+    this.youSeat,
+    this.turnSeat,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (ctx, c) {
+      final w = c.maxWidth;
+      final h = c.maxHeight;
+      final r = math.min(w, h) / 2 - 36; // radius for chips
+      final centerX = w / 2;
+      final centerY = h / 2;
+
+      // Angle step; seat 0 at top by default
+      final step = 2 * math.pi / seats;
+      final startAngle = -math.pi / 2; // top
+
+      List<Widget> children = [];
+      for (int s = 0; s < seats; s++) {
+        final angle = startAngle + s * step;
+        final x = centerX + r * math.cos(angle);
+        final y = centerY + r * math.sin(angle);
+
+        final name = (s < names.length && names[s].isNotEmpty) ? names[s] : 'Seat $s';
+        final cnt  = (s < counts.length) ? counts[s] : 0;
+        final isYou = (youSeat == s);
+        final isTurn = (turnSeat == s);
+
+        children.add(Positioned(
+          left: x - 64,
+          top:  y - 30,
+          width: 128,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: isTurn ? Colors.yellow.withOpacity(0.25) : Colors.white,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: isTurn ? Colors.amber : (isYou ? Colors.blue : Colors.black12),
+                width: isTurn ? 3 : (isYou ? 2 : 1),
+              ),
+              boxShadow: isTurn ? [const BoxShadow(blurRadius: 10, spreadRadius: 1, color: Colors.amberAccent)] : null,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  name + (isYou ? '  (You)' : ''),
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontWeight: isTurn ? FontWeight.w700 : FontWeight.w500,
+                  ),
+                ),
+                Text('cards: $cnt', style: const TextStyle(fontSize: 12)),
+              ],
+            ),
+          ),
+        ));
+      }
+
+      // Center marker for orientation (optional)
+      children.add(Positioned(
+        left: centerX - 4, top: centerY - 4, child: const SizedBox(width: 8, height: 8,
+          child: DecoratedBox(decoration: BoxDecoration(color: Colors.black26, shape: BoxShape.circle)),
+        ),
+      ));
+
+      return Stack(children: children);
+    });
   }
 }

@@ -100,7 +100,10 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		// We already validated Origin; skip library same-origin checks in dev.
+		InsecureSkipVerify: true,
+	})
 	if err != nil {
 		return
 	}
@@ -115,7 +118,10 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	// writer
 	go func() {
 		ping := time.NewTicker(15 * time.Second)
-		defer func() { ping.Stop(); _ = c.Close(websocket.StatusNormalClosure, "bye") }()
+		defer func() {
+			ping.Stop()
+			_ = c.Close(websocket.StatusNormalClosure, "bye")
+		}()
 		for {
 			select {
 			case msg, ok := <-client.send:
@@ -156,6 +162,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 					for _, id := range room.PlayerIDs {
 						if id == client.id {
 							h.sendStateToRoom(room)
+							break
 						}
 					}
 				}
@@ -174,7 +181,9 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			}
 			roomID := randID()
 			room := &Room{
-				ID: roomID, Game: "mulatschak", Seats: seats,
+				ID:        roomID,
+				Game:      "mulatschak",
+				Seats:     seats,
 				PlayerIDs: make([]string, seats),
 			}
 			h.roomsMu.Lock()
@@ -205,7 +214,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			h.roomsMu.Lock()
-			room = h.rooms[roomID]
+			room = h.rooms[roomID] // re-fetch under write lock
 			if room.PlayerIDs[seat] == "" {
 				room.PlayerIDs[seat] = client.id
 				full := true
@@ -221,7 +230,10 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			}
 			h.roomsMu.Unlock()
 			log.Printf("room %s join seat=%d client=%s", roomID, seat, client.id)
+
+			// Send per-seat state to the joiner, then refresh everyone already seated.
 			h.sendState(client, room, seat)
+			h.sendStateToRoom(room)
 			h.broadcastRooms()
 
 		case "leave_table":
@@ -235,6 +247,13 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			h.roomsMu.Unlock()
+			// refresh room state (names/counts) for remaining players
+			h.roomsMu.RLock()
+			r := h.rooms[roomID]
+			h.roomsMu.RUnlock()
+			if r != nil {
+				h.sendStateToRoom(r)
+			}
 			h.broadcastRooms()
 
 		// ---- Table API ----
@@ -279,9 +298,9 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			h.roomsMu.Lock()
 			room, ok = h.rooms[roomID]
 			if ok && room.Started && !room.HandOver && seat == room.Turn && typ == "play_card" {
-				// must own the card
 				hand := room.Hands[seat]
-				// enforce must-follow if not leading
+
+				// must-follow enforcement (if not leading)
 				if len(room.Trick) > 0 && hasSuit(hand, room.Lead, room.Trump) {
 					if !followsSuit(c, room.Lead, room.Trump) {
 						// illegal -> ignore move
@@ -289,9 +308,11 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 						break
 					}
 				}
+
 				if nh, owned := removeCard(hand, c); owned {
 					room.Hands[seat] = nh
-					// if leading this trick, set lead
+
+					// set lead if leading
 					if len(room.Trick) == 0 {
 						if c.Rank == "WELI" {
 							room.Lead = room.Trump
@@ -299,6 +320,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 							room.Lead = c.Suit
 						}
 					}
+
 					room.Trick = append(room.Trick, c)
 					room.TrickBy = append(room.TrickBy, seat)
 
@@ -336,6 +358,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "chat":
+			// room-scoped chat
 			roomID, _ := m.M["room"].(string)
 			text, _ := m.M["text"].(string)
 			if roomID == "" || text == "" {
@@ -600,7 +623,7 @@ func trickWinner(trick []Card, by []int, trump, lead string) int {
 }
 
 func (h *Hub) sendState(c *Client, r *Room, seat int) {
-	// seat name resolution
+	// seat names
 	names := make([]string, r.Seats)
 	h.namesMu.RLock()
 	for i := 0; i < r.Seats; i++ {
@@ -617,7 +640,7 @@ func (h *Hub) sendState(c *Client, r *Room, seat int) {
 		counts[s] = len(r.Hands[s])
 	}
 
-	// publish current trick for UI
+	// current trick for UI
 	trick := make([]map[string]interface{}, len(r.Trick))
 	for i := range r.Trick {
 		trick[i] = map[string]interface{}{
@@ -626,6 +649,7 @@ func (h *Hub) sendState(c *Client, r *Room, seat int) {
 			"by":   r.TrickBy[i],
 		}
 	}
+
 	msg := Msg{
 		T: "state",
 		M: map[string]interface{}{
