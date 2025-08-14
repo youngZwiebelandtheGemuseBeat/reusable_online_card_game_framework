@@ -1,34 +1,34 @@
 package main
 
 import (
-	"context"
 	"log"
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/youngZwiebelandtheGemuseBeat/reusable_online_card_game_framework/server/internal/ws"
 )
 
 func main() {
 	port := getenv("PORT", "8080")
-	allow := strings.Split(getenv("ORIGIN_ALLOWLIST", "http://localhost:5173,http://localhost:"+port), ",")
+	allow := strings.Split(getenv("ORIGIN_ALLOWLIST", "http://localhost:"+port+",http://127.0.0.1:"+port), ",")
 
 	hub := ws.NewHub(allow)
 	go hub.Run()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-		hub.ServeWS(ctx, w, r)
+		hub.ServeWS(w, r)
 	})
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200); w.Write([]byte("ok")) })
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 
-	srv := &http.Server{Addr: ":" + port, Handler: cors(allow, mux)}
 	log.Printf("server listening on :%s", port)
-	log.Fatal(srv.ListenAndServe())
+	if err := http.ListenAndServe(":"+port, cors(allow, mux)); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func getenv(k, d string) string {
@@ -39,13 +39,18 @@ func getenv(k, d string) string {
 }
 
 func cors(allow []string, next http.Handler) http.Handler {
+	allowSet := map[string]struct{}{}
+	for _, a := range allow {
+		if a != "" {
+			allowSet[a] = struct{}{}
+		}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		for _, a := range allow {
-			if a == origin {
+		if origin != "" {
+			if _, ok := allowSet[origin]; ok {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
-				break
 			}
 		}
 		if r.Method == http.MethodOptions {

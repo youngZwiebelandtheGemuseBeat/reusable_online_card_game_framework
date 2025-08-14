@@ -1,8 +1,16 @@
 name: card_client
+description: Dev web client for reusable_online_card_game_framework
 environment:
   sdk: ">=3.4.0 <4.0.0"
+
 dependencies:
   flutter:
     sdk: flutter
   web_socket_channel: ^2.4.0
-  flutter_riverpod: ^2.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
