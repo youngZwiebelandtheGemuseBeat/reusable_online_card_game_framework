@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: cardplatform-api
+    env: docker
+    plan: free
+    dockerfilePath: ./deploy/Dockerfile.server
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: ORIGIN_ALLOWLIST
+        value: https://cardplatform-web.onrender.com
