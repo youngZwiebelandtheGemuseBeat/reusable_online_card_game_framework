@@ -4,9 +4,17 @@ Thumbs.db
 *.log
 *.tmp
 .tmp/
+# Environment & secrets
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.mobileprovision
+*.keystore
+*.jks
 
 # --- Editor/IDE ---
 .vscode/*
@@ -20,70 +28,77 @@ Thumbs.db
 *.rej
 
 # --- Go (server) ---
-/server/bin/
-/server/build/
-/server/dist/
-/server/coverage.out
-/server/*.exe
-/server/*.test
-/server/*.out
+server/bin/
+server/build/
+server/dist/
+server/coverage.out
+server/*.exe
+server/*.test
+server/*.out
+
+# (Note: if you decide to use vendor mode later, DO NOT ignore server/vendor/)
 
 # --- Flutter/Dart (client) ---
-/client/.dart_tool/
-/client/.packages
-/client/.flutter-plugins
-/client/.flutter-plugins-dependencies
-/client/.metadata
-/client/.fvm
-/client/build/
-/client/coverage/
-**/pubspec.lock
+client/.dart_tool/
+client/.packages
+client/.flutter-plugins
+client/.flutter-plugins-dependencies
+client/.metadata
+client/.fvm
+client/build/
+client/coverage/
+# For apps, keep pubspec.lock checked in:
+# (do NOT ignore client/pubspec.lock)
 
 # --- Flutter Web artifacts ---
-/client/build/web/
-# (Build outputs; CI/CD will produce them)
+client/build/web/
 
 # --- Android ---
-/client/android/.gradle/
-/client/android/local.properties
-/client/android/app/*.keystore
-/client/android/app/*.jks
-/client/android/build/
-/client/android/captures/
-/client/android/*.iml
-/client/android/.idea/
+client/android/.gradle/
+client/android/local.properties
+client/android/app/*.keystore
+client/android/app/*.jks
+client/android/build/
+client/android/captures/
+client/android/*.iml
+client/android/.idea/
 
 # --- iOS ---
-/client/ios/Pods/
-/client/ios/.symlinks/
-/client/ios/Flutter/Flutter.framework
-/client/ios/Flutter/Flutter.podspec
-/client/ios/Flutter/App.framework
-/client/ios/Flutter/Generated.xcconfig
-/client/ios/build/
-/client/ios/DerivedData/
-/client/ios/*.xcworkspace/xcuserdata/
-/client/ios/Runner.xcodeproj/project.xcworkspace/xcuserdata/
-/client/ios/*.xcuserstate
+client/ios/Pods/
+client/ios/.symlinks/
+client/ios/Flutter/Flutter.framework
+client/ios/Flutter/App.framework
+client/ios/Flutter/Generated.xcconfig
+client/ios/build/
+client/ios/DerivedData/
+client/ios/*.xcworkspace/xcuserdata/
+client/ios/Runner.xcodeproj/project.xcworkspace/xcuserdata/
+client/ios/*.xcuserstate
 
 # --- macOS ---
-/client/macos/Pods/
-/client/macos/DerivedData/
-/client/macos/build/
-/client/macos/*.xcworkspace/xcuserdata/
-/client/macos/*.xcuserstate
+client/macos/Pods/
+client/macos/DerivedData/
+client/macos/build/
+client/macos/*.xcworkspace/xcuserdata/
+client/macos/*.xcuserstate
 
 # --- Windows/Linux (Flutter desktop) ---
-/client/windows/build/
-/client/linux/build/
+client/windows/build/
+client/linux/build/
 
-# --- Assets / LFS (optional: uncomment if you adopt Git LFS) ---
-# *.psd filter=lfs diff=lfs merge=lfs -text
+# --- Release artifacts (don’t commit store bundles) ---
+*.ipa
+*.aab
+*.apk
+*.app
+
+# --- Assets via LFS (optional) ---
+# If you adopt Git LFS, add patterns in .gitattributes instead of ignoring:
 # *.wav filter=lfs diff=lfs merge=lfs -text
 # *.mp3 filter=lfs diff=lfs merge=lfs -text
 # *.png filter=lfs diff=lfs merge=lfs -text
 # *.jpg filter=lfs diff=lfs merge=lfs -text
 # *.svg filter=lfs diff=lfs merge=lfs -text
 
-# --- Node (if you add tooling for the web shell later) ---
+# --- Node (if you add tooling later) ---
 node_modules/
