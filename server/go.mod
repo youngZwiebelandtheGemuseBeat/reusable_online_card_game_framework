@@ -1,8 +1,5 @@
-module example.com/reusable_online_card_game_framework
+module github.com/youngZwiebelandtheGemuseBeat/reusable_online_card_game_framework/server
 
-go 1.22.0
+go 1.23.2
 
-require (
-    nhooyr.io/websocket v1.8.10
-    github.com/yuin/gopher-lua v1.1.0
-)
+require nhooyr.io/websocket v1.8.10

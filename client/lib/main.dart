@@ -26,7 +26,7 @@ class _CardAppState extends State<CardApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       home: Scaffold(
-        appBar: AppBar(title: const Text('CardPlatform — Mulatschak v1')),
+        appBar: AppBar(title: const Text('reusable_online_card_game_framework — Mulatschak v1')),
         body: Column(children: [
           Expanded(child: ListView.builder(
             itemCount: log.length,

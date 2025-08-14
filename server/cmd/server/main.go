@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"example.com/reuasable_online_card_game_framework/internal/ws"
+	"github.com/youngZwiebelandtheGemuseBeat/reusable_online_card_game_framework/server/internal/ws"
 )
 
 func main() {

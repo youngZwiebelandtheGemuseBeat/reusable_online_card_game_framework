@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: cardplatform-api
+    name: reusable_online_card_game_framework-api
     env: docker
     plan: free
     dockerfilePath: ./deploy/Dockerfile.server
@@ -8,4 +8,4 @@ services:
       - key: PORT
         value: 8080
       - key: ORIGIN_ALLOWLIST
-        value: https://cardplatform-web.onrender.com
+        value: https://reusable_online_card_game_framework-web.onrender.com
