@@ -14,13 +14,8 @@ class AppRoot extends StatefulWidget {
 
 class _AppRootState extends State<AppRoot> {
   final ws = WsService();
-
   @override
-  void initState() {
-    super.initState();
-    ws.connect();
-  }
-
+  void initState() { super.initState(); ws.connect(); }
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -62,15 +57,11 @@ class _LobbyPageState extends State<LobbyPage> {
         });
       }
     });
-    // request initial snapshot
     widget.ws.send({"t":"list_rooms"});
   }
 
   @override
-  void dispose() {
-    roomCtrl.dispose();
-    super.dispose();
-  }
+  void dispose() { roomCtrl.dispose(); super.dispose(); }
 
   void _create() {
     widget.ws.send({"t":"create_table","m":{"game":"mulatschak","seats":3}});
@@ -79,7 +70,6 @@ class _LobbyPageState extends State<LobbyPage> {
   void _joinById(String id) {
     if (id.isEmpty) return;
     widget.ws.send({"t":"join_table","m":{"room":id}});
-    // Navigate to table page; it will render when 'state' arrives.
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => TablePage(ws: widget.ws, roomId: id),
     ));
@@ -101,16 +91,11 @@ class _LobbyPageState extends State<LobbyPage> {
                 child: TextField(
                   controller: roomCtrl,
                   decoration: const InputDecoration(
-                    labelText: 'Room ID',
-                    hintText: 'Paste to join',
-                    isDense: true,
+                    labelText: 'Room ID', hintText: 'Paste to join', isDense: true,
                   ),
                 ),
               ),
-              OutlinedButton(
-                onPressed: () => _joinById(roomCtrl.text.trim()),
-                child: const Text('Join by ID'),
-              ),
+              OutlinedButton(onPressed: () => _joinById(roomCtrl.text.trim()), child: const Text('Join by ID')),
             ]),
             const SizedBox(height: 16),
             const Text('Open tables:', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -158,15 +143,16 @@ class TablePage extends StatefulWidget {
   final WsService ws;
   final String roomId;
   const TablePage({super.key, required this.ws, required this.roomId});
-
   @override
   State<TablePage> createState() => _TablePageState();
 }
 
 class _TablePageState extends State<TablePage> {
   int? seat, turn;
-  String? trump;
+  String? trump, lead;
   List<dynamic> hand = [];
+  List<Map<String, dynamic>> trick = [];
+
   final chat = <String>[];
   final chatCtrl = TextEditingController();
 
@@ -182,7 +168,11 @@ class _TablePageState extends State<TablePage> {
               seat = (m['m']['seat'] as num).toInt();
               turn = (m['m']['turn'] as num).toInt();
               trump = m['m']['trump'] as String?;
+              lead = m['m']['lead'] as String?;
               hand = List<dynamic>.from(m['m']['you'] as List? ?? const []);
+              trick = ((m['m']['trick'] as List?) ?? const [])
+                  .map((e) => Map<String, dynamic>.from((e as Map).map((k, v) => MapEntry(k.toString(), v))))
+                  .toList();
             });
           }
           break;
@@ -195,15 +185,11 @@ class _TablePageState extends State<TablePage> {
           break;
       }
     });
-    // If we arrived here without having joined (deep link), try join now:
-    widget.ws.send({"t":"join_table","m":{"room": widget.roomId}});
+    // In case we deep-linked, try to join this room.
   }
 
   @override
-  void dispose() {
-    chatCtrl.dispose();
-    super.dispose();
-  }
+  void dispose() { chatCtrl.dispose(); super.dispose(); }
 
   void _sendChat() {
     final t = chatCtrl.text.trim();
@@ -214,7 +200,7 @@ class _TablePageState extends State<TablePage> {
 
   void _leave() {
     widget.ws.send({"t":"leave_table","m":{"room": widget.roomId}});
-    Navigator.of(context).pop(); // back to Lobby
+    Navigator.of(context).pop();
   }
 
   @override
@@ -230,7 +216,18 @@ class _TablePageState extends State<TablePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Seat: ${seat ?? "-"}  |  Turn: ${turn ?? "-"}  |  Trump: ${trump ?? "-"}'),
+            Text('Seat: ${seat ?? "-"}  |  Turn: ${turn ?? "-"}  |  Trump: ${trump ?? "-"}  |  Lead: ${lead ?? "-"}'),
+            const Divider(),
+            const Text('On table (current trick):'),
+            Wrap(
+              spacing: 8, runSpacing: 8,
+              children: trick.map<Widget>((t) {
+                final rank = t['rank']?.toString() ?? '?';
+                final suit = t['suit']?.toString() ?? '?';
+                final by = (t['by'] as num?)?.toInt();
+                return Chip(label: Text('$rank-$suit  (s${by ?? "?"})'));
+              }).toList(),
+            ),
             const Divider(),
             const Text('Your hand:'),
             Wrap(

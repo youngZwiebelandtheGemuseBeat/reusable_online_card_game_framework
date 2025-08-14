@@ -36,9 +36,15 @@ type Room struct {
 	Seats     int
 	PlayerIDs []string       // seat -> client.id ("" if empty)
 	Hands     map[int][]Card // seat -> hand
-	Turn      int            // current seat to act
-	Started   bool
-	Trump     string // "A","L","H","B"
+
+	// Trick state
+	Lead    string // suit led for current trick (if lead is trump, Weli counts as trump)
+	Trick   []Card
+	TrickBy []int
+
+	Turn    int // current seat to act
+	Started bool
+	Trump   string // "A","L","H","B"
 }
 
 type Hub struct {
@@ -133,19 +139,17 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		// ---- Lobby API ----
 
 		case "list_rooms":
-			// one-shot snapshot for this client
 			h.sendRoomsSnapshotTo(client)
 
 		case "create_table":
-			// m.M: game, seats
 			seats := 3
 			if v, ok := m.M["seats"].(float64); ok && v >= 2 && v <= 5 {
 				seats = int(v)
 			}
 			roomID := randID()
 			room := &Room{
-				ID: roomID, Game: "mulatschak",
-				Seats: seats, PlayerIDs: make([]string, seats),
+				ID: roomID, Game: "mulatschak", Seats: seats,
+				PlayerIDs: make([]string, seats),
 			}
 			h.roomsMu.Lock()
 			h.rooms[roomID] = room
@@ -155,7 +159,6 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			h.broadcastRooms()
 
 		case "join_table":
-			// m.M: room
 			roomID, _ := m.M["room"].(string)
 			h.roomsMu.RLock()
 			room := h.rooms[roomID]
@@ -164,7 +167,6 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				h.sendTo(client, Msg{T: "error", M: map[string]interface{}{"code": "NO_ROOM"}})
 				break
 			}
-			// assign first empty seat
 			seat := -1
 			for i := 0; i < room.Seats; i++ {
 				if room.PlayerIDs[i] == "" {
@@ -176,12 +178,10 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				h.sendTo(client, Msg{T: "error", M: map[string]interface{}{"code": "ROOM_FULL"}})
 				break
 			}
-			// occupy
 			h.roomsMu.Lock()
-			room = h.rooms[roomID] // re-get under write lock
+			room = h.rooms[roomID]
 			if room.PlayerIDs[seat] == "" {
 				room.PlayerIDs[seat] = client.id
-				// start when full
 				full := true
 				for i := 0; i < room.Seats; i++ {
 					if room.PlayerIDs[i] == "" {
@@ -195,19 +195,17 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			}
 			h.roomsMu.Unlock()
 			log.Printf("room %s join seat=%d client=%s", roomID, seat, client.id)
-			// send per-seat state to the joiner
 			h.sendState(client, room, seat)
 			h.broadcastRooms()
 
 		case "leave_table":
-			// m.M: room
 			roomID, _ := m.M["room"].(string)
 			h.roomsMu.Lock()
 			if room, ok := h.rooms[roomID]; ok {
 				for i := 0; i < room.Seats; i++ {
 					if room.PlayerIDs[i] == client.id {
 						room.PlayerIDs[i] = ""
-						break
+						// if table empties completely, we could delete it (keep for now)
 					}
 				}
 			}
@@ -217,7 +215,6 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		// ---- Table API ----
 
 		case "state":
-			// re-send state: m.M.room, m.M.seat
 			roomID, _ := m.M["room"].(string)
 			seat := int(m.M["seat"].(float64))
 			h.roomsMu.RLock()
@@ -236,25 +233,54 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			c := Card{Suit: cardMap["Suit"].(string), Rank: cardMap["Rank"].(string)}
 
 			var room *Room
+			var ok bool
 			h.roomsMu.Lock()
-			room = h.rooms[roomID]
-			if room != nil && room.Started && seat == room.Turn && typ == "play_card" {
+			room, ok = h.rooms[roomID]
+			if ok && room.Started && seat == room.Turn && typ == "play_card" {
+				// must own the card
 				hand := room.Hands[seat]
-				if nh, ok := removeCard(hand, c); ok {
+				// enforce must-follow if not leading
+				if len(room.Trick) > 0 && hasSuit(hand, room.Lead, room.Trump) {
+					if !followsSuit(c, room.Lead, room.Trump) {
+						// illegal -> ignore
+						h.roomsMu.Unlock()
+						break
+					}
+				}
+				if nh, owned := removeCard(hand, c); owned {
 					room.Hands[seat] = nh
-					// TODO: trick collection & rules; advance turn for now
-					room.Turn = (room.Turn + 1) % room.Seats
+					// if leading this trick, set lead
+					if len(room.Trick) == 0 {
+						if c.Rank == "WELI" {
+							room.Lead = room.Trump
+						} else {
+							room.Lead = c.Suit
+						}
+					}
+					room.Trick = append(room.Trick, c)
+					room.TrickBy = append(room.TrickBy, seat)
+
+					// advance or resolve trick
+					if len(room.Trick) == room.Seats {
+						winner := trickWinner(room.Trick, room.TrickBy, room.Trump, room.Lead)
+						// clear trick
+						room.Trick = nil
+						room.TrickBy = nil
+						room.Lead = ""
+						// winner leads next trick
+						room.Turn = winner
+					} else {
+						room.Turn = (room.Turn + 1) % room.Seats
+					}
 				}
 			}
 			h.roomsMu.Unlock()
 
-			// per-seat state refresh to players in room
 			if room != nil {
 				h.sendStateToRoom(room)
 			}
 
 		case "chat":
-			// m.M: room, text  ->  send only to that room
 			roomID, _ := m.M["room"].(string)
 			text, _ := m.M["text"].(string)
 			if roomID == "" || text == "" {
@@ -426,9 +452,10 @@ func deal(r *Room) {
 		}
 		r.Hands[seat] = append([]Card{}, d[start:end]...)
 	}
+	r.Trick, r.TrickBy, r.Lead = nil, nil, ""
 	r.Turn = 0
 	r.Started = true
-	r.Trump = "H" // default; real rules later
+	r.Trump = "H" // default; bidding later
 }
 
 func removeCard(hand []Card, c Card) ([]Card, bool) {
@@ -441,17 +468,95 @@ func removeCard(hand []Card, c Card) ([]Card, bool) {
 	return hand, false
 }
 
+// must the player follow suit?
+func hasSuit(hand []Card, suit, trump string) bool {
+	for _, x := range hand {
+		if suit == trump {
+			if x.Rank == "WELI" || x.Suit == trump {
+				return true
+			}
+		} else {
+			if x.Suit == suit && x.Rank != "WELI" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func followsSuit(c Card, lead, trump string) bool {
+	if lead == trump {
+		return c.Rank == "WELI" || c.Suit == trump
+	}
+	return c.Suit == lead && c.Rank != "WELI"
+}
+
+// trick winner: if any trump played (incl. Weli), highest trump wins;
+// else highest of lead suit wins.
+// trump order: A(trump) > WELI > K > O > U > 10 > 9 > 8 > 7
+// non-trump order (for lead suit): A > K > O > U > 10 > 9 > 8 > 7
+var rankVal = map[string]int{"A": 7, "K": 6, "O": 5, "U": 4, "10": 3, "9": 2, "8": 1, "7": 0}
+
+func trickWinner(trick []Card, by []int, trump, lead string) int {
+	bestIdx := -1
+	bestScore := -1
+	// first pass: look for trumps
+	for i, c := range trick {
+		if c.Rank == "WELI" || c.Suit == trump {
+			score := 0
+			if c.Rank == "WELI" {
+				score = 99 // second highest trump
+			} else if c.Rank == "A" && c.Suit == trump {
+				score = 100 // highest trump
+			} else {
+				score = 50 + rankVal[c.Rank] // K..7 trump
+			}
+			if score > bestScore {
+				bestScore = score
+				bestIdx = i
+			}
+		}
+	}
+	if bestIdx >= 0 {
+		return by[bestIdx]
+	}
+	// no trumps: evaluate on lead suit (Weli never matches non-trump lead)
+	for i, c := range trick {
+		if lead != "" && c.Suit == lead && c.Rank != "WELI" {
+			score := rankVal[c.Rank]
+			if score > bestScore {
+				bestScore = score
+				bestIdx = i
+			}
+		}
+	}
+	// fallback (shouldn't happen), give to first
+	if bestIdx < 0 {
+		bestIdx = 0
+	}
+	return by[bestIdx]
+}
+
 func (h *Hub) sendState(c *Client, r *Room, seat int) {
-	// your hand; others show counts only (client renders its own view)
 	counts := make([]int, r.Seats)
 	for s := 0; s < r.Seats; s++ {
 		counts[s] = len(r.Hands[s])
+	}
+	// publish current trick for UI
+	trick := make([]map[string]interface{}, len(r.Trick))
+	for i := range r.Trick {
+		trick[i] = map[string]interface{}{
+			"suit": r.Trick[i].Suit,
+			"rank": r.Trick[i].Rank,
+			"by":   r.TrickBy[i],
+		}
 	}
 	msg := Msg{
 		T: "state",
 		M: map[string]interface{}{
 			"room": r.ID, "seat": seat, "turn": r.Turn, "trump": r.Trump,
 			"you": r.Hands[seat], "counts": counts, "started": r.Started,
+			"lead": r.Lead, "trick": trick,
 		},
 	}
 	h.sendTo(c, msg)
