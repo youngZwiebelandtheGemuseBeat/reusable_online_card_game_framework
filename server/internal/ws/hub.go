@@ -28,7 +28,7 @@ type Client struct {
 	send chan []byte
 }
 
-type Card struct{ Suit, Rank string } // Suit: A,L,H,B ; Rank: A,K,O,U,10,9,8,7 or "WELI"
+type Card struct{ Suit, Rank string } // Suit: hearts/spades/clubs/diamonds ; Rank: ace..seven or "weli" (diamonds-six special)
 
 type Room struct {
 	ID        string
@@ -38,14 +38,14 @@ type Room struct {
 	Hands     map[int][]Card // seat -> hand
 
 	// Trick state
-	Lead    string // suit led for current trick (if lead is trump, Weli counts as trump)
+	Lead    string // suit led for current trick (if lead is trump, weli counts as trump)
 	Trick   []Card
 	TrickBy []int
 
 	Turn     int    // current seat to act
 	Started  bool   // hand in progress
 	HandOver bool   // hand finished (all hands empty)
-	Trump    string // "A","L","H","B"
+	Trump    string // "hearts" | "spades" | "clubs" | "diamonds"
 }
 
 type Hub struct {
@@ -156,7 +156,8 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				h.namesMu.Lock()
 				h.names[client.id] = name
 				h.namesMu.Unlock()
-				// update any seated table states to show names
+
+				// refresh any table the client is seated in
 				h.roomsMu.RLock()
 				for _, room := range h.rooms {
 					for _, id := range room.PlayerIDs {
@@ -231,7 +232,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			h.roomsMu.Unlock()
 			log.Printf("room %s join seat=%d client=%s", roomID, seat, client.id)
 
-			// Send per-seat state to the joiner, then refresh everyone already seated.
+			// send per-seat state to the joiner, then refresh everyone seated
 			h.sendState(client, room, seat)
 			h.sendStateToRoom(room)
 			h.broadcastRooms()
@@ -247,7 +248,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			h.roomsMu.Unlock()
-			// refresh room state (names/counts) for remaining players
+			// refresh remaining players at the table
 			h.roomsMu.RLock()
 			r := h.rooms[roomID]
 			h.roomsMu.RUnlock()
@@ -314,7 +315,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 
 					// set lead if leading
 					if len(room.Trick) == 0 {
-						if c.Rank == "WELI" {
+						if c.Rank == "weli" {
 							room.Lead = room.Trump
 						} else {
 							room.Lead = c.Suit
@@ -499,17 +500,20 @@ func (h *Hub) sendStateToRoom(room *Room) {
 	h.mu.RUnlock()
 }
 
+// ---- Deck & rules with English suit/rank names ----
+
 func mkDeck33() []Card {
-	ranks := []string{"A", "K", "O", "U", "10", "9", "8", "7"}
-	suits := []string{"A", "L", "H", "B"} // Acorns, Leaves, Hearts, Bells
+	// 8 ranks per suit (no sixes) + Weli (diamonds-six special)
+	ranks := []string{"ace", "king", "queen", "jack", "ten", "nine", "eight", "seven"}
+	suits := []string{"clubs", "spades", "hearts", "diamonds"}
 	var d []Card
 	for _, s := range suits {
 		for _, r := range ranks {
 			d = append(d, Card{Suit: s, Rank: r})
 		}
 	}
-	// Add Weli (Bells-6). Other 6s not included in ranks.
-	d = append(d, Card{Suit: "B", Rank: "WELI"})
+	// Weli (Schelle-6): special trump in diamonds, outranks all trumps except trump ace
+	d = append(d, Card{Suit: "diamonds", Rank: "weli"})
 	return shuffle(d)
 }
 
@@ -527,10 +531,10 @@ func shuffle(in []Card) []Card {
 func deal(r *Room) {
 	d := mkDeck33()
 	r.Hands = map[int][]Card{}
-	const hands = 5
+	const handSize = 5
 	for seat := 0; seat < r.Seats; seat++ {
-		start := seat * hands
-		end := start + hands
+		start := seat * handSize
+		end := start + handSize
 		if end > len(d) {
 			end = len(d)
 		}
@@ -540,7 +544,7 @@ func deal(r *Room) {
 	r.Turn = 0
 	r.Started = true
 	r.HandOver = false
-	r.Trump = "H" // default; bidding later
+	r.Trump = "hearts" // placeholder; bidding will set this later
 }
 
 func removeCard(hand []Card, c Card) ([]Card, bool) {
@@ -557,11 +561,11 @@ func removeCard(hand []Card, c Card) ([]Card, bool) {
 func hasSuit(hand []Card, suit, trump string) bool {
 	for _, x := range hand {
 		if suit == trump {
-			if x.Rank == "WELI" || x.Suit == trump {
+			if x.Rank == "weli" || x.Suit == trump {
 				return true
 			}
 		} else {
-			if x.Suit == suit && x.Rank != "WELI" {
+			if x.Suit == suit && x.Rank != "weli" {
 				return true
 			}
 		}
@@ -571,30 +575,32 @@ func hasSuit(hand []Card, suit, trump string) bool {
 
 func followsSuit(c Card, lead, trump string) bool {
 	if lead == trump {
-		return c.Rank == "WELI" || c.Suit == trump
+		return c.Rank == "weli" || c.Suit == trump
 	}
-	return c.Suit == lead && c.Rank != "WELI"
+	return c.Suit == lead && c.Rank != "weli"
 }
 
-// trick winner: if any trump played (incl. Weli), highest trump wins;
-// else highest of lead suit wins.
-// trump order: A(trump) > WELI > K > O > U > 10 > 9 > 8 > 7
-// non-trump order (for lead suit): A > K > O > U > 10 > 9 > 8 > 7
-var rankVal = map[string]int{"A": 7, "K": 6, "O": 5, "U": 4, "10": 3, "9": 2, "8": 1, "7": 0}
+// trick winner: if any trump (incl. weli) was played, highest trump wins;
+// else highest of the lead suit wins.
+// trump order: ace(trump) > weli > king > queen > jack > ten > nine > eight > seven
+// non-trump lead order: ace > king > queen > jack > ten > nine > eight > seven
+var rankVal = map[string]int{
+	"ace": 7, "king": 6, "queen": 5, "jack": 4, "ten": 3, "nine": 2, "eight": 1, "seven": 0,
+}
 
 func trickWinner(trick []Card, by []int, trump, lead string) int {
 	bestIdx := -1
 	bestScore := -1
-	// first pass: look for trumps
+	// trumps first (incl. weli)
 	for i, c := range trick {
-		if c.Rank == "WELI" || c.Suit == trump {
+		if c.Rank == "weli" || c.Suit == trump {
 			score := 0
-			if c.Rank == "WELI" {
-				score = 99 // second highest trump
-			} else if c.Rank == "A" && c.Suit == trump {
+			if c.Rank == "weli" {
+				score = 99 // second-highest trump
+			} else if c.Rank == "ace" && c.Suit == trump {
 				score = 100 // highest trump
 			} else {
-				score = 50 + rankVal[c.Rank] // K..7 trump
+				score = 50 + rankVal[c.Rank] // other trumps
 			}
 			if score > bestScore {
 				bestScore = score
@@ -605,9 +611,9 @@ func trickWinner(trick []Card, by []int, trump, lead string) int {
 	if bestIdx >= 0 {
 		return by[bestIdx]
 	}
-	// no trumps: evaluate on lead suit (Weli never matches non-trump lead)
+	// no trumps: evaluate on lead suit (weli never matches non-trump lead)
 	for i, c := range trick {
-		if lead != "" && c.Suit == lead && c.Rank != "WELI" {
+		if lead != "" && c.Suit == lead && c.Rank != "weli" {
 			score := rankVal[c.Rank]
 			if score > bestScore {
 				bestScore = score
@@ -615,7 +621,7 @@ func trickWinner(trick []Card, by []int, trump, lead string) int {
 			}
 		}
 	}
-	// fallback (shouldn't happen), give to first
+	// fallback (shouldn't happen)
 	if bestIdx < 0 {
 		bestIdx = 0
 	}
