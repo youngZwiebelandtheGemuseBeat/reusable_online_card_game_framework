@@ -2,7 +2,7 @@
 -- All 6s removed EXCEPT Weli (Bells-6), which is permanent trump.
 -- Specials: Hearts trump doubles scores; Acorns trump = no drop-out (no staying home).
 -- Bidding min=2; announcing 1 is only legal if trump=Hearts (and then Hearts is trump).
--- Auto-Mulatschak: if hand holds {A(trump), Weli, K(trump), O(trump), U(trump)} → skip bidding; must lead trump Ace.
+-- Auto-Mulatschak: if hand holds {A(trump), Weli, K(trump), Q(trump), J(trump)} → skip bidding; must lead trump Ace.
 
 local M = {}
 
@@ -11,9 +11,10 @@ function M.spec()
     name = "mulatschak",
     seats = {min=2, max=5, default=3},
     deck = {
-      suits = {"A"/*Acorns*/, "L"/*Leaves*/, "H"/*Hearts*/, "B"/*Bells*/},
-      ranks = {"A","K","O","U","10","9","8","7"},
-      include_weli = true,  -- Bells-6
+      -- suits = {"A"/*Acorns*/, "L"/*Leaves*/, "H"/*Hearts*/, "B"/*Bells*/},
+      suits = {"S", "C", "H", "D"},
+      ranks = {"A","K","Q","J","10","9","8","7"},
+      include_weli = true,  -- D-6
     },
     rules = {
       hearts_double = true,
@@ -26,7 +27,7 @@ function M.spec()
 end
 
 -- Utility: check auto-mulatschak predicate for a hand
--- hand: array of {suit=..., rank=...} (rank "A","K","O","U","10","9","8","7" or "WELI")
+-- hand: array of {suit=..., rank=...} (rank "A","K","Q","J","10","9","8","7" or "WELI")
 function M.is_auto_mulatschak(hand)
   -- Count by suit
   local suits = {A={},L={},H={},B={}}
@@ -37,7 +38,7 @@ function M.is_auto_mulatschak(hand)
     end
   end
   if not weli then return false end
-  local tops = {"A","K","O","U"}
+  local tops = {"A","K","Q","J"} -- {"A","K","O","U"}
   for s,_ in pairs(suits) do
     local ok = true
     for _,r in ipairs(tops) do
