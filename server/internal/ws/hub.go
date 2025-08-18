@@ -52,19 +52,22 @@ type Room struct {
 	// Dealer / bidding
 	Dealer      int    // rotates each hand; -1 before first deal
 	FirstBidder int    // (Dealer+1)%Seats
-	Phase       string // "bidding" | "pick_trump" | "play"
+	Phase       string // "cut" | "bidding" | "pick_trump" | "play"
 	Actor       int    // whose turn to act during bidding
 	BestBid     int    // highest bid so far (0 = none, 1..5)
 	BestBy      int    // seat who holds BestBid (-1 if none)
 	Passed      map[int]bool
 	RoundDouble bool // set by "knock" (Draufklopfen) — cutter only
 
-	// Cut preview (visible ONLY to the cutter/first bidder during bidding)
+	// Cut preview (visible ONLY to the cutter/first bidder during CUT phase)
 	CutPeek    Card
 	HasCutPeek bool
 
 	// Internal: cutter kept Weli?
 	weliKeptBy int // -1 if none; else seat index
+
+	// Pending deck (between cut and deal)
+	stock []Card
 }
 
 type Hub struct {
@@ -237,7 +240,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if full && (room.Phase == "" || room.HandOver || (!room.Started && len(room.Trick) == 0)) {
-					startHand(room) // rotates dealer, cut preview, maybe weli keep, phase=bidding
+					startHand(room) // rotates dealer, sets CUT phase with peek
 				}
 			}
 			h.roomsMu.Unlock()
@@ -277,6 +280,59 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				if !room.Started || room.HandOver || len(room.Trick) == 0 {
 					startHand(room)
 				}
+			}
+			h.roomsMu.Unlock()
+			h.roomsMu.RLock()
+			room := h.rooms[roomID]
+			h.roomsMu.RUnlock()
+			if room != nil {
+				h.sendStateToRoom(room)
+			}
+
+		// Proceed from CUT -> deal -> bidding
+		case "cut_proceed":
+			roomID, _ := m.M["room"].(string)
+			seat := int(m.M["seat"].(float64))
+			h.roomsMu.Lock()
+			if room, ok := h.rooms[roomID]; ok && room.Phase == "cut" && seat == room.FirstBidder {
+				// Deal from room.stock
+				const handSize = 5
+				room.Hands = map[int][]Card{}
+				d := append([]Card{}, room.stock...)
+
+				for s := 0; s < room.Seats; s++ {
+					start := s * handSize
+					end := start + handSize
+					if end > len(d) {
+						end = len(d)
+					}
+					room.Hands[s] = append([]Card{}, d[start:end]...)
+				}
+				// ensure weli goes to cutter if reserved
+				if room.weliKeptBy >= 0 {
+					has := false
+					for _, c := range room.Hands[room.weliKeptBy] {
+						if c.Rank == "weli" && c.Suit == "diamonds" {
+							has = true
+							break
+						}
+					}
+					if !has {
+						room.Hands[room.weliKeptBy] = append(room.Hands[room.weliKeptBy], Card{Suit: "diamonds", Rank: "weli"})
+						if len(room.Hands[room.weliKeptBy]) > handSize {
+							room.Hands[room.weliKeptBy] = room.Hands[room.weliKeptBy][:handSize]
+						}
+					}
+				}
+
+				// clear cut UI
+				room.HasCutPeek = false
+				room.CutPeek = Card{}
+				room.stock = nil
+
+				// move to bidding
+				room.Phase = "bidding"
+				room.Actor = room.FirstBidder
 			}
 			h.roomsMu.Unlock()
 			h.roomsMu.RLock()
@@ -686,6 +742,8 @@ func startHand(r *Room) {
 		r.Dealer = (r.Dealer + 1) % r.Seats
 	}
 	r.FirstBidder = (r.Dealer + 1) % r.Seats
+
+	// reset round state
 	r.RoundDouble = false
 	r.HandOver = false
 	r.Trump = ""
@@ -697,10 +755,12 @@ func startHand(r *Room) {
 	r.weliKeptBy = -1
 	r.HasCutPeek = false
 	r.CutPeek = Card{}
+	r.Hands = map[int][]Card{} // empty hands during cut
+	r.stock = nil
 
 	// fresh deck & cut
 	d := mkDeck33()
-	// simulate a cut: choose cut point and note the bottom card of the lifted stack (visible to cutter)
+	// simulate a cut: choose cut point and note the bottom card of the lifted stack
 	if len(d) > 2 {
 		var b [8]byte
 		_, _ = crand.Read(b[:])
@@ -712,8 +772,8 @@ func startHand(r *Room) {
 		r.CutPeek = d[cut-1]
 		r.HasCutPeek = true
 
-		// If it's the Weli, cutter (first bidder) keeps it.
-		if d[cut-1].Rank == "weli" && d[cut-1].Suit == "diamonds" {
+		// If it's the Weli, cutter (first bidder) keeps it; remove from stock now
+		if r.CutPeek.Rank == "weli" && r.CutPeek.Suit == "diamonds" {
 			r.weliKeptBy = r.FirstBidder
 			// remove a weli from the deck to avoid duplicates
 			idx := -1
@@ -730,38 +790,13 @@ func startHand(r *Room) {
 		}
 	}
 
-	// deal 5 cards per seat
-	const handSize = 5
-	r.Hands = map[int][]Card{}
-	for seat := 0; seat < r.Seats; seat++ {
-		start := seat * handSize
-		end := start + handSize
-		if end > len(d) {
-			end = len(d)
-		}
-		r.Hands[seat] = append([]Card{}, d[start:end]...)
-	}
-	// If weli was kept by cutter, ensure it's in their hand
-	if r.weliKeptBy >= 0 {
-		has := false
-		for _, c := range r.Hands[r.weliKeptBy] {
-			if c.Rank == "weli" && c.Suit == "diamonds" {
-				has = true
-				break
-			}
-		}
-		if !has {
-			r.Hands[r.weliKeptBy] = append(r.Hands[r.weliKeptBy], Card{Suit: "diamonds", Rank: "weli"})
-			if len(r.Hands[r.weliKeptBy]) > handSize {
-				r.Hands[r.weliKeptBy] = r.Hands[r.weliKeptBy][:handSize]
-			}
-		}
-	}
+	// keep deck for later dealing
+	r.stock = d
 
-	// bidding starts with first bidder
-	r.Phase = "bidding"
+	// phase: CUT (only cutter sees CutPeek)
+	r.Phase = "cut"
 	r.Actor = r.FirstBidder
-	r.Turn = r.FirstBidder // for UI arrow until play starts
+	r.Turn = r.FirstBidder // UI arrow can point to cutter until play starts
 }
 
 func deal(r *Room) { // kept for compatibility; use startHand()
@@ -876,9 +911,9 @@ func (h *Hub) sendState(c *Client, r *Room, seat int) {
 		}
 	}
 
-	// cut peek (ONLY for the cutter during bidding)
+	// cut peek (ONLY for the cutter during CUT phase)
 	var cutPeek map[string]interface{}
-	if r.Phase == "bidding" && r.HasCutPeek && seat == r.FirstBidder {
+	if r.Phase == "cut" && r.HasCutPeek && seat == r.FirstBidder {
 		cutPeek = map[string]interface{}{"suit": r.CutPeek.Suit, "rank": r.CutPeek.Rank}
 	}
 
@@ -890,7 +925,7 @@ func (h *Hub) sendState(c *Client, r *Room, seat int) {
 			"dealer": r.Dealer, "firstBidder": r.FirstBidder,
 			"bestBid": r.BestBid, "bestBy": r.BestBy, "passed": passed,
 			"roundDouble": r.RoundDouble,
-			"cutPeek":     cutPeek, // null for everyone except cutter during bidding
+			"cutPeek":     cutPeek, // null for everyone except cutter during CUT
 
 			"turn": r.Turn, "trump": r.Trump,
 			"you": r.Hands[seat], "counts": counts,

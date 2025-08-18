@@ -174,7 +174,7 @@ class _TablePageState extends State<TablePage> {
               passed = ((m['m']['passed'] as List?) ?? const []).map((e) => (e as num).toInt()).toList();
               roundDouble = (m['m']['roundDouble'] ?? false) as bool;
 
-              // cut peek (may be null unless you're cutter during bidding)
+              // cut peek (may be null unless you're cutter during CUT)
               final cp = m['m']['cutPeek'];
               cutPeek = (cp is Map) ? Map<String, dynamic>.from(cp.map((k, v) => MapEntry(k.toString(), v))) : null;
 
@@ -225,6 +225,7 @@ class _TablePageState extends State<TablePage> {
   void _bid(int n) => widget.ws.send({"t":"bid","m":{"room": widget.roomId, "seat": seat, "bid": n}});
   void _knock() => widget.ws.send({"t":"knock","m":{"room": widget.roomId, "seat": seat}});
   void _pickTrump(String t) => widget.ws.send({"t":"pick_trump","m":{"room": widget.roomId, "seat": seat, "trump": t}});
+  void _cutProceed() => widget.ws.send({"t":"cut_proceed","m":{"room": widget.roomId, "seat": seat}});
 
   @override
   Widget build(BuildContext context) {
@@ -251,22 +252,32 @@ class _TablePageState extends State<TablePage> {
 
           const Divider(),
 
-          // ------- Cut preview for cutter during bidding -------
-          if (phase == 'bidding' && seat == firstBidder && cutPeek != null) ...[
-            Card(
-              elevation: 0,
-              color: Colors.green.withOpacity(0.12),
-              child: Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: Row(children: [
-                  const Icon(Icons.content_cut),
-                  const SizedBox(width: 8),
-                  Text('Your cut — bottom card: ${cutPeek!['rank']}-${cutPeek!['suit']}'),
-                  const Spacer(),
-                  const Text('Only you can see this', style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
-                ]),
+          // ------- CUT phase (only cutter sees the bottom card; others wait) -------
+          if (phase == 'cut') ...[
+            if (seat == firstBidder && cutPeek != null)
+              Card(
+                elevation: 0,
+                color: Colors.green.withOpacity(0.12),
+                child: Padding(
+                  padding: const EdgeInsets.all(8.0),
+                  child: Row(children: [
+                    const Icon(Icons.content_cut),
+                    const SizedBox(width: 8),
+                    Text('Your cut — bottom card: ${cutPeek!['rank']}-${cutPeek!['suit']}'),
+                    const Spacer(),
+                    FilledButton.icon(onPressed: _cutProceed, icon: const Icon(Icons.play_arrow), label: const Text('Deal & start bidding')),
+                  ]),
+                ),
+              )
+            else
+              Card(
+                elevation: 0,
+                color: Colors.green.withOpacity(0.06),
+                child: const Padding(
+                  padding: EdgeInsets.all(8.0),
+                  child: Text('Cutter is inspecting the cut…'),
+                ),
               ),
-            ),
             const SizedBox(height: 8),
           ],
 
