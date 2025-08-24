@@ -10,55 +10,58 @@ import (
 )
 
 func main() {
-	port := getenv("PORT", "8080")
-	allow := strings.Split(getenv("ORIGIN_ALLOWLIST", "http://localhost:"+port+",http://127.0.0.1:"+port), ",")
+	// --- config (envs) ---
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	// Comma-separated allow list of browser Origins.
+	// Example: WS_ALLOW_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+	allowCSV := os.Getenv("WS_ALLOW_ORIGINS")
+	var allow []string
+	if allowCSV != "" {
+		for _, s := range strings.Split(allowCSV, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				allow = append(allow, s)
+			}
+		}
+	} else {
+		// sensible dev defaults
+		allow = []string{
+			"http://localhost:5173",
+			"http://127.0.0.1:5173",
+			"http://localhost:" + port,
+			"http://127.0.0.1:" + port,
+		}
+	}
 
+	// --- hub + routes ---
 	hub := ws.NewHub(allow)
-	go hub.Run()
 
 	mux := http.NewServeMux()
+
+	// WebSocket endpoint
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		hub.ServeWS(w, r)
 	})
+
+	// Health check / quick sanity
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	log.Printf("server listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, cors(allow, mux)); err != nil {
-		log.Fatal(err)
-	}
-}
-
-func getenv(k, d string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return d
-}
-
-func cors(allow []string, next http.Handler) http.Handler {
-	allowSet := map[string]struct{}{}
-	for _, a := range allow {
-		if a != "" {
-			allowSet[a] = struct{}{}
-		}
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			if _, ok := allowSet[origin]; ok {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
-			}
-		}
-		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
+	// Minimal root info so you see something in browser
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("Reusable Card Game Server running. WebSocket at /ws\n"))
 	})
+
+	addr := ":" + port
+	log.Printf("Server listening on %s", addr)
+	log.Printf("Allowed Origins: %v", allow)
+	log.Printf("WebSocket endpoint: ws://localhost:%s/ws", port)
+
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatalf("server error: %v", err)
+	}
 }
