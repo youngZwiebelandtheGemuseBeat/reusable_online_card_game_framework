@@ -186,7 +186,6 @@ class _TablePageState extends State<TablePage> {
   int swamp = 0;
   int exchangeMax = 3;
 
-  // exchange UI state
   final Set<int> _sel = {};
 
   final chatCtrl = TextEditingController();
@@ -229,7 +228,6 @@ class _TablePageState extends State<TablePage> {
               swamp = ((m['m']['swamp'] as num?) ?? 0).toInt();
               exchangeMax = ((m['m']['exchangeMax'] as num?) ?? 3).toInt();
 
-              // reset selection when phase/actor changes
               if (phase != 'exchange' || seat != actor) {
                 _sel.clear();
               }
@@ -261,7 +259,7 @@ class _TablePageState extends State<TablePage> {
     chatCtrl.clear();
   }
 
-  // ---- actions
+  // actions
   void _startChoice(String choice) => widget.ws.send({"t":"start_choice","m":{"room": widget.roomId, "seat": seat, "choice": choice}}); // 'cut' | 'knock'
   void _cutProceed() => widget.ws.send({"t":"cut_proceed","m":{"room": widget.roomId, "seat": seat}});
   void _pass() => widget.ws.send({"t":"pass","m":{"room": widget.roomId, "seat": seat}});
@@ -297,6 +295,9 @@ class _TablePageState extends State<TablePage> {
       setState(() => _sel.clear());
     }
   }
+  void _exchangeDoneNoSwap() {
+    widget.ws.send({"t":"exchange_done","m":{"room": widget.roomId, "seat": seat}});
+  }
 
   bool _stayedSeat(int s) => stayed.contains(s);
 
@@ -307,7 +308,6 @@ class _TablePageState extends State<TablePage> {
 
     final youAreActor = (seat != null && actor != null && seat == actor);
     final declarer = bestBy;
-
     final canStayHome = (trump != 'clubs') && (seat != declarer);
 
     return Scaffold(
@@ -329,7 +329,7 @@ class _TablePageState extends State<TablePage> {
 
           const Divider(),
 
-          // ------- START phase -------
+          // START
           if (phase == 'start') ...[
             Card(
               elevation: 0,
@@ -337,12 +337,7 @@ class _TablePageState extends State<TablePage> {
               child: Padding(
                 padding: const EdgeInsets.all(8.0),
                 child: Row(children: [
-                  Expanded(
-                    child: Text(
-                      (seat == firstBidder) ? 'Start of hand — your choice' : 'Waiting for s$firstBidder to start the hand',
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                  ),
+                  Expanded(child: Text((seat == firstBidder) ? 'Start of hand — your choice' : 'Waiting for s$firstBidder')),
                   if (seat == firstBidder) ...[
                     OutlinedButton.icon(onPressed: () => _startChoice('cut'), icon: const Icon(Icons.content_cut), label: const Text('Cut')),
                     const SizedBox(width: 8),
@@ -354,7 +349,7 @@ class _TablePageState extends State<TablePage> {
             const SizedBox(height: 8),
           ],
 
-          // ------- CUT phase -------
+          // CUT
           if (phase == 'cut') ...[
             if (seat == firstBidder && cutPeek != null)
               Card(
@@ -375,15 +370,12 @@ class _TablePageState extends State<TablePage> {
               Card(
                 elevation: 0,
                 color: Colors.green.withOpacity(0.06),
-                child: const Padding(
-                  padding: EdgeInsets.all(8.0),
-                  child: Text('Cutter is inspecting the cut…'),
-                ),
+                child: const Padding(padding: EdgeInsets.all(8.0), child: Text('Cutter is inspecting the cut…')),
               ),
             const SizedBox(height: 8),
           ],
 
-          // ------- BIDDING + TRUMP PICK -------
+          // BIDDING / PICK_TRUMP
           if (phase == 'bidding' || phase == 'pick_trump') ...[
             if (phase == 'bidding')
               Card(
@@ -392,7 +384,7 @@ class _TablePageState extends State<TablePage> {
                 child: Padding(
                   padding: const EdgeInsets.all(8.0),
                   child: Row(children: [
-                    Expanded(child: Text((actor != null && seat == actor) ? 'Your turn to bid' : 'Waiting for s${actor ?? "-"} to bid')),
+                    Expanded(child: Text((actor != null && seat == actor) ? 'Your turn to bid' : 'Waiting for s${actor ?? "-"}')),
                     OutlinedButton(onPressed: (actor != null && seat == actor) ? _pass : null, child: const Text('Pass')),
                     const SizedBox(width: 8),
                     Wrap(spacing: 6, children: [
@@ -409,7 +401,6 @@ class _TablePageState extends State<TablePage> {
               padding: const EdgeInsets.symmetric(vertical: 6),
               child: Text('Best bid: ${bestBid ?? 0}  by seat ${bestBy ?? "-"}  •  Passed: ${passed.map((e)=>"s$e").join(", ")}'),
             ),
-
             const Divider(),
             const Text('Your hand:'),
             Wrap(
@@ -421,7 +412,6 @@ class _TablePageState extends State<TablePage> {
               }).toList(),
             ),
             const Divider(),
-
             if (phase == 'pick_trump')
               Row(children: [
                 const Text('Pick trump:'),
@@ -436,28 +426,25 @@ class _TablePageState extends State<TablePage> {
             const Divider(),
           ],
 
-          // ------- EXCHANGE -------
+          // EXCHANGE
           if (phase == 'exchange') ...[
             Row(children: [
-              Expanded(child: Text(youAreActor ? 'Your exchange' : 'Waiting for s${actor ?? "-"} to exchange')),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-                child: Text('Talon: $talon'),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-                child: Text('Swamp: $swamp'),
-              ),
+              Expanded(child: Text(youAreActor ? 'Your exchange' : 'Waiting for s${actor ?? "-"}')),
+              Padding(padding: const EdgeInsets.symmetric(horizontal: 6), child: Text('Talon: $talon')),
+              Padding(padding: const EdgeInsets.symmetric(horizontal: 6), child: Text('Swamp: $swamp')),
             ]),
             const SizedBox(height: 8),
-            if (youAreActor) Row(children: [
+            if (youAreActor) Wrap(spacing: 8, children: [
               if (seat != bestBy && trump != 'clubs')
                 OutlinedButton.icon(onPressed: _stayHome, icon: const Icon(Icons.door_front_door), label: const Text('Stay home')),
-              const SizedBox(width: 8),
               FilledButton.icon(
                 onPressed: _sel.isNotEmpty && _sel.length <= exchangeMax ? _exchangeSelected : null,
                 icon: const Icon(Icons.swap_horiz),
                 label: Text('Exchange selected (${_sel.length}/$exchangeMax)'),
+              ),
+              OutlinedButton(
+                onPressed: _sel.isEmpty ? _exchangeDoneNoSwap : null,
+                child: const Text("Done (no exchange)"),
               ),
             ]),
             const SizedBox(height: 8),
@@ -479,7 +466,7 @@ class _TablePageState extends State<TablePage> {
             const Divider(),
           ],
 
-          // ------- PLAY -------
+          // PLAY
           if (phase == 'play') ...[
             const Text('On table (current trick):'),
             Wrap(
@@ -510,7 +497,7 @@ class _TablePageState extends State<TablePage> {
             const Divider(),
           ],
 
-          // ------- Chat -------
+          // Chat
           const Text('Chat:'),
           Row(children: [
             Expanded(child: TextField(controller: chatCtrl, decoration: const InputDecoration(isDense: true, hintText: 'Say something'))),
@@ -522,10 +509,7 @@ class _TablePageState extends State<TablePage> {
             child: Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(border: Border.all(color: Colors.black12), borderRadius: BorderRadius.circular(6)),
-              child: ListView.builder(
-                itemCount: chat.length,
-                itemBuilder: (_, i) => Text(chat[i]),
-              ),
+              child: ListView.builder(itemCount: chat.length, itemBuilder: (_, i) => Text(chat[i])),
             ),
           ),
         ]),

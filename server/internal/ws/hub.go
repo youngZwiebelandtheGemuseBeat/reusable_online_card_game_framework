@@ -5,7 +5,6 @@ import (
 	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -20,7 +19,7 @@ import (
 // ----------------------------- Types & Models -----------------------------
 
 type Card struct {
-	Suit string `json:"Suit"` // keep PascalCase to match client-side expectations for "you"
+	Suit string `json:"Suit"` // keep PascalCase to match client-side "you"
 	Rank string `json:"Rank"`
 }
 
@@ -38,24 +37,28 @@ type Room struct {
 
 	// Trick/play state
 	Lead     string
-	Trick    []Card // cards on table this trick (server stores Suit/Rank)
-	TrickBy  []int  // seat index for each card in Trick
-	Turn     int    // current turn seat
-	HandOver bool   // round ended
+	Trick    []Card
+	TrickBy  []int
+	Turn     int
+	HandOver bool
 
 	// Round meta
-	Trump   string // "", or hearts/spades/clubs/diamonds
-	Started bool   // during trick play
+	Trump   string // "", hearts/spades/clubs/diamonds
+	Started bool
 
 	// Dealer / bidding
 	Dealer      int    // rotates each hand; -1 before first deal
 	FirstBidder int    // (Dealer+1)%Seats
-	Phase       string // "start" | "cut" | "bidding" | "pick_trump" | "play"
-	Actor       int    // whose turn to act during start/bidding
+	Phase       string // "start" | "cut" | "bidding" | "pick_trump" | "exchange" | "play"
+	Actor       int    // whose turn to act (start/bidding/exchange)
 	BestBid     int    // 0 = none; 1..5
 	BestBy      int    // -1 = none
 	Passed      map[int]bool
-	RoundDouble bool // set by "start_choice: knock"
+	RoundDouble bool // set by start_choice: knock
+
+	// Exchange phase
+	Stayed map[int]bool // seat -> chose to stay home
+	Acted  map[int]bool // seat -> already acted in exchange
 
 	// Cut preview
 	CutPeek    Card
@@ -64,10 +67,12 @@ type Room struct {
 	// Weli holder after cut (if bottom card was weli)
 	WeliKeptBy int // -1 if none
 
-	// internal undealt stock after cut
-	stock []Card
-
-	// names for seats (server fills from hub.names when sending)
+	// Piles
+	stock          []Card // talon (remaining deck after deal)
+	swamp          []Card // face-down discards; shuffled when first used
+	swampShuffled  bool
+	exchangeMax    int // per current seats; 3 for 3p
+	exchangeClosed bool
 }
 
 type Client struct {
@@ -118,7 +123,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// local dev: accept all origins when running via --dart-define WS_URL
+		// dev-friendly; tighten via WS_ALLOW_ORIGINS for prod
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
@@ -134,9 +139,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		seat: -1,
 	}
 	h.addClient(client)
-
-	// On connect, list rooms
-	h.sendRoomsList(client)
+	h.sendRoomsList(client) // greet
 
 	go client.writePump()
 	client.readPump()
@@ -174,7 +177,6 @@ func (c *Client) readPump() {
 			continue
 		}
 		if env.T == "ping" {
-			// ignore
 			continue
 		}
 		c.hub.handleMessage(c, env.T, env.M)
@@ -196,16 +198,13 @@ func (h *Hub) addClient(c *Client) {
 }
 
 func (h *Hub) removeClient(c *Client) {
-	// remove from room if seated
 	if c.roomID != "" && c.seat >= 0 {
 		h.roomsMu.Lock()
 		if room, ok := h.rooms[c.roomID]; ok {
 			if room.Conns[c.seat] == c {
 				room.Conns[c.seat] = nil
 				room.PlayerIDs[c.seat] = ""
-				// clear hand visibility on leave
 				delete(room.Hands, c.seat)
-				// if everyone left, delete room
 				allEmpty := true
 				for _, pid := range room.PlayerIDs {
 					if pid != "" {
@@ -274,6 +273,7 @@ func (h *Hub) sendRoomsList(to *Client) {
 
 func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 	switch typ {
+
 	case "set_name":
 		name := strings.TrimSpace(fmt.Sprint(m["name"]))
 		if name != "" {
@@ -281,6 +281,7 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 			h.names[c.id] = name
 			h.namesMu.Unlock()
 		}
+
 	case "create_table":
 		seats := 3
 		if v, ok := m["seats"].(float64); ok {
@@ -304,6 +305,8 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 			BestBy:      -1,
 			Passed:      make(map[int]bool),
 			WeliKeptBy:  -1,
+			Stayed:      make(map[int]bool),
+			Acted:       make(map[int]bool),
 		}
 		h.roomsMu.Lock()
 		h.rooms[id] = room
@@ -320,7 +323,6 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 			h.send(c, "error", map[string]any{"msg": "room not found"})
 			return
 		}
-		// pick first empty seat
 		seat := -1
 		for i := 0; i < room.Seats; i++ {
 			if room.PlayerIDs[i] == "" && room.Conns[i] == nil {
@@ -339,11 +341,9 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 		c.seat = seat
 		h.roomsMu.Unlock()
 
-		// greet and sync state
 		h.sendRoomsList(c)
 		h.sendStateTo(c, room)
 
-		// auto-start when all seats filled
 		h.roomsMu.RLock()
 		full := true
 		for _, pid := range room.PlayerIDs {
@@ -356,7 +356,6 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 		if full && !room.Started && room.Dealer == -1 {
 			h.startHand(room)
 		} else {
-			// notify others about join
 			h.broadcastState(room)
 		}
 
@@ -398,6 +397,8 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 		}
 		h.startHand(room)
 
+	// ----- start / cut / bidding -----
+
 	case "start_choice":
 		roomID := fmt.Sprint(m["room"])
 		choice := strings.TrimSpace(fmt.Sprint(m["choice"])) // "cut" or "knock"
@@ -408,7 +409,6 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 			if choice == "knock" {
 				room.RoundDouble = true
 			}
-			// perform cut
 			performCut(room)
 			room.Phase = "cut"
 			room.Actor = room.FirstBidder
@@ -425,7 +425,6 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 		room := h.rooms[roomID]
 		if room != nil && room.Phase == "cut" && seat == room.FirstBidder {
 			deal(room)
-			// start bidding
 			room.Phase = "bidding"
 			room.Actor = room.FirstBidder
 			room.BestBid = 0
@@ -456,7 +455,7 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 			}
 			room.Actor = adv
 
-			// end condition: if only one active and we have a bid
+			// end condition: only one active & we have a bid
 			active := 0
 			for s := 0; s < room.Seats; s++ {
 				if room.PlayerIDs[s] != "" && !room.Passed[s] {
@@ -466,10 +465,8 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 			if active == 1 && room.BestBy != -1 {
 				room.Actor = room.BestBy
 				if room.BestBid == 1 {
-					room.Trump = "hearts"
-					room.Phase = "play"
-					room.Turn = room.BestBy
-					room.Started = true
+					room.Trump = "hearts" // auto-hearts
+					startExchange(room)   // >>> go to EXCHANGE <<<
 				} else {
 					room.Phase = "pick_trump"
 				}
@@ -490,7 +487,6 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 			if bid >= 1 && bid <= 5 && bid > room.BestBid {
 				room.BestBid = bid
 				room.BestBy = seat
-				// advance to next actor
 				room.Actor = nextActiveBidder(room, seat)
 			}
 		}
@@ -508,9 +504,7 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 		if room != nil && room.Phase == "pick_trump" && seat == room.BestBy {
 			if tr == "hearts" || tr == "spades" || tr == "clubs" || tr == "diamonds" {
 				room.Trump = tr
-				room.Phase = "play"
-				room.Turn = room.BestBy
-				room.Started = true
+				startExchange(room) // >>> go to EXCHANGE after trump <<<
 			}
 		}
 		h.roomsMu.Unlock()
@@ -518,17 +512,106 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 			h.broadcastState(room)
 		}
 
+	// ----- Exchange phase -----
+
+	case "stay_home":
+		roomID := fmt.Sprint(m["room"])
+		seat := toInt(m["seat"])
+		h.roomsMu.Lock()
+		room := h.rooms[roomID]
+		if room != nil && room.Phase == "exchange" && seat == room.Actor && !room.Acted[seat] {
+			// declarer cannot stay home, clubs forbids stay home
+			if seat != room.BestBy && room.Trump != "clubs" {
+				room.Stayed[seat] = true
+				room.Acted[seat] = true
+				advanceExchangeOrStartPlay(room)
+			}
+		}
+		h.roomsMu.Unlock()
+		if room != nil {
+			h.broadcastState(room)
+		}
+
+	case "exchange":
+		roomID := fmt.Sprint(m["room"])
+		seat := toInt(m["seat"])
+		cardsAny, _ := m["cards"].([]interface{})
+		h.roomsMu.Lock()
+		room := h.rooms[roomID]
+		if room != nil && room.Phase == "exchange" && seat == room.Actor && !room.Acted[seat] && !room.Stayed[seat] {
+			maxN := room.exchangeMax
+			n := len(cardsAny)
+			if n >= 1 && n <= maxN {
+				// discards -> swamp
+				for _, v := range cardsAny {
+					cardM, _ := v.(map[string]interface{})
+					suit := strings.ToLower(fmt.Sprint(cardM["Suit"]))
+					rank := strings.ToLower(fmt.Sprint(cardM["Rank"]))
+					idx := -1
+					for i, c := range room.Hands[seat] {
+						if strings.ToLower(c.Suit) == suit && strings.ToLower(c.Rank) == rank {
+							idx = i
+							break
+						}
+					}
+					if idx >= 0 {
+						room.swamp = append(room.swamp, room.Hands[seat][idx])
+						room.Hands[seat] = append(room.Hands[seat][:idx], room.Hands[seat][idx+1:]...)
+					}
+				}
+				// replacements: talon first, then shuffled swamp
+				need := n
+				for need > 0 && len(room.stock) > 0 {
+					room.Hands[seat] = append(room.Hands[seat], room.stock[0])
+					room.stock = room.stock[1:]
+					need--
+				}
+				if need > 0 && len(room.swamp) > 0 {
+					if !room.swampShuffled {
+						shuffle(room.swamp)
+						room.swampShuffled = true
+					}
+					for need > 0 && len(room.swamp) > 0 {
+						room.Hands[seat] = append(room.Hands[seat], room.swamp[0])
+						room.swamp = room.swamp[1:]
+						need--
+					}
+				}
+				room.Acted[seat] = true
+				advanceExchangeOrStartPlay(room)
+			}
+		}
+		h.roomsMu.Unlock()
+		if room != nil {
+			h.broadcastState(room)
+		}
+
+	case "exchange_done": // NEW: explicitly "no exchange"
+		roomID := fmt.Sprint(m["room"])
+		seat := toInt(m["seat"])
+		h.roomsMu.Lock()
+		room := h.rooms[roomID]
+		if room != nil && room.Phase == "exchange" && seat == room.Actor && !room.Acted[seat] {
+			// neither stayed nor swapped -> just mark acted
+			room.Acted[seat] = true
+			advanceExchangeOrStartPlay(room)
+		}
+		h.roomsMu.Unlock()
+		if room != nil {
+			h.broadcastState(room)
+		}
+
+	// ----- Play -----
+
 	case "move":
-		// currently only type: play_card
 		roomID := fmt.Sprint(m["room"])
 		seat := toInt(m["seat"])
 		mv, _ := m["type"].(string)
 		h.roomsMu.Lock()
 		room := h.rooms[roomID]
-		if room != nil && room.Phase == "play" && mv == "play_card" && seat == room.Turn && !room.HandOver {
+		if room != nil && room.Phase == "play" && mv == "play_card" && seat == room.Turn && !room.HandOver && !room.Stayed[seat] {
 			cardM, _ := m["card"].(map[string]interface{})
 			card := Card{Suit: strings.ToLower(fmt.Sprint(cardM["Suit"])), Rank: strings.ToLower(fmt.Sprint(cardM["Rank"]))}
-			// locate card in player's hand
 			hi := -1
 			for i, c := range room.Hands[seat] {
 				if strings.ToLower(c.Suit) == card.Suit && strings.ToLower(c.Rank) == card.Rank {
@@ -537,32 +620,25 @@ func (h *Hub) handleMessage(c *Client, typ string, m map[string]interface{}) {
 				}
 			}
 			if hi >= 0 {
-				// play it
 				room.Trick = append(room.Trick, room.Hands[seat][hi])
 				room.TrickBy = append(room.TrickBy, seat)
 				room.Hands[seat] = append(room.Hands[seat][:hi], room.Hands[seat][hi+1:]...)
-
-				// set lead on first card of trick
 				if len(room.Trick) == 1 {
 					room.Lead = room.Trick[0].Suit
 				}
+				room.Turn = nextInSeat(room, seat)
 
-				// advance turn
-				room.Turn = nextSeat(room, seat)
-
-				// if trick complete (all players who still have cards played)
-				if len(room.TrickBy) == countActivePlayers(room) {
-					// naive: trick winner = first card's player (TODO: implement proper winner)
+				if len(room.TrickBy) == countInPlayers(room) {
+					// TODO: real trick winner; placeholder = first
 					winner := room.TrickBy[0]
 					room.Turn = winner
 					room.Trick = nil
 					room.TrickBy = nil
 					room.Lead = ""
 
-					// check if round over: all hands empty
 					empty := true
 					for s := 0; s < room.Seats; s++ {
-						if len(room.Hands[s]) > 0 && room.PlayerIDs[s] != "" {
+						if room.PlayerIDs[s] != "" && !room.Stayed[s] && len(room.Hands[s]) > 0 {
 							empty = false
 							break
 						}
@@ -612,36 +688,75 @@ func (h *Hub) startHand(room *Room) {
 	room.HasCutPeek = false
 	room.CutPeek = Card{}
 	room.WeliKeptBy = -1
+
 	room.stock = nil
+	room.swamp = nil
+	room.swampShuffled = false
+	room.exchangeClosed = false
+	room.Stayed = make(map[int]bool)
+	room.Acted = make(map[int]bool)
 
-	// new phase: start (first bidder decides knock or cut)
+	if room.Seats == 3 {
+		room.exchangeMax = 3
+	} else {
+		room.exchangeMax = 3
+	}
+
 	room.Phase = "start"
-
-	// names refresh on send
 	h.broadcastState(room)
+}
+
+func startExchange(room *Room) {
+	room.Phase = "exchange"
+	room.Actor = room.BestBy
+	room.exchangeClosed = false
+	room.Stayed = make(map[int]bool)
+	room.Acted = make(map[int]bool)
+}
+
+func advanceExchangeOrStartPlay(room *Room) {
+	allActed := true
+	for s := 0; s < room.Seats; s++ {
+		if room.PlayerIDs[s] == "" {
+			continue
+		}
+		if !room.Acted[s] {
+			allActed = false
+			break
+		}
+	}
+	if allActed {
+		room.exchangeClosed = true
+		room.Phase = "play"
+		room.Turn = room.BestBy
+		room.Started = true
+		return
+	}
+	next := nextSeat(room, room.Actor)
+	for i := 0; i < room.Seats; i++ {
+		if room.PlayerIDs[next] != "" && !room.Acted[next] {
+			room.Actor = next
+			return
+		}
+		next = nextSeat(room, next)
+	}
 }
 
 func performCut(room *Room) {
 	deck := buildMulatschakDeck()
 	shuffle(deck)
-	// choose a cut point (at least 1 and at most len-1)
 	if len(deck) < 2 {
 		return
 	}
 	cut := rand.Intn(len(deck)-1) + 1
-	// bottom of lower packet = deck[cut-1]
 	bottom := deck[cut-1]
 	room.CutPeek = bottom
 	room.HasCutPeek = true
 	room.WeliKeptBy = -1
-	// if bottom is weli -> cutter (firstBidder) keeps it; remove from deck
 	if isWeli(bottom) {
 		room.WeliKeptBy = room.FirstBidder
-		// remove bottom from deck
 		deck = append(deck[:cut-1], deck[cut:]...)
 	}
-
-	// stock is the deck after cut (no dealing yet)
 	room.stock = deck
 }
 
@@ -651,7 +766,7 @@ func deal(room *Room) {
 		shuffle(deck)
 		room.stock = deck
 	}
-	// give 5 to each player (Mulatschak)
+	// 5 cards to each seat
 	for i := 0; i < 5; i++ {
 		for s := 0; s < room.Seats; s++ {
 			if room.PlayerIDs[s] == "" {
@@ -664,9 +779,7 @@ func deal(room *Room) {
 			room.stock = room.stock[1:]
 		}
 	}
-	// if weli was kept by cutter, ensure it's in their hand (and trim extra)
 	if room.WeliKeptBy >= 0 {
-		// ensure weli present
 		hasW := false
 		for _, c := range room.Hands[room.WeliKeptBy] {
 			if isWeli(c) {
@@ -677,18 +790,14 @@ func deal(room *Room) {
 		if !hasW {
 			room.Hands[room.WeliKeptBy] = append(room.Hands[room.WeliKeptBy], Card{Suit: "diamonds", Rank: "weli"})
 		}
-		// trim to 5 if over-dealt
 		if len(room.Hands[room.WeliKeptBy]) > 5 {
 			room.Hands[room.WeliKeptBy] = room.Hands[room.WeliKeptBy][:5]
 		}
 	}
-	// clear stock for now (no exchange implemented)
-	room.stock = nil
+	// IMPORTANT: keep remaining room.stock as talon for exchange
 }
 
 func buildMulatschakDeck() []Card {
-	// 33-card William Tell-like deck: A,K,O,U,10,9,8,7 in each suit plus Weli (Diamonds Six)
-	// We'll map to rank strings commonly used in code: ace, king, ober, unter, ten, nine, eight, seven
 	ranks := []string{"ace", "king", "ober", "unter", "ten", "nine", "eight", "seven"}
 	suits := []string{"hearts", "spades", "clubs", "diamonds"}
 	deck := make([]Card, 0, 33)
@@ -697,7 +806,6 @@ func buildMulatschakDeck() []Card {
 			deck = append(deck, Card{Suit: s, Rank: r})
 		}
 	}
-	// add weli (diamonds six)
 	deck = append(deck, Card{Suit: "diamonds", Rank: "weli"})
 	return deck
 }
@@ -736,10 +844,21 @@ func nextActiveBidder(room *Room, from int) int {
 	return from
 }
 
-func countActivePlayers(room *Room) int {
+func nextInSeat(room *Room, from int) int {
+	n := room.Seats
+	for i := 1; i <= n; i++ {
+		s := (from + i) % n
+		if room.PlayerIDs[s] != "" && !room.Stayed[s] {
+			return s
+		}
+	}
+	return from
+}
+
+func countInPlayers(room *Room) int {
 	cnt := 0
 	for s := 0; s < room.Seats; s++ {
-		if room.PlayerIDs[s] != "" {
+		if room.PlayerIDs[s] != "" && !room.Stayed[s] {
 			cnt++
 		}
 	}
@@ -767,7 +886,6 @@ func (h *Hub) sendStateTo(to *Client, r *Room) {
 	for s := 0; s < r.Seats; s++ {
 		counts[s] = len(r.Hands[s])
 	}
-	// names aligned to seats
 	names := make([]string, r.Seats)
 	for s := 0; s < r.Seats; s++ {
 		id := r.PlayerIDs[s]
@@ -776,15 +894,19 @@ func (h *Hub) sendStateTo(to *Client, r *Room) {
 		h.namesMu.RUnlock()
 	}
 
-	// passed list for UI
 	passed := make([]int, 0, len(r.Passed))
 	for s := range r.Passed {
 		if r.Passed[s] {
 			passed = append(passed, s)
 		}
 	}
+	stayed := make([]int, 0, len(r.Stayed))
+	for s := range r.Stayed {
+		if r.Stayed[s] {
+			stayed = append(stayed, s)
+		}
+	}
 
-	// trick for UI uses lowercase keys and 'by'
 	trick := make([]map[string]any, 0, len(r.Trick))
 	for i, c := range r.Trick {
 		trick = append(trick, map[string]any{
@@ -815,19 +937,23 @@ func (h *Hub) sendStateTo(to *Client, r *Room) {
 			"bestBy":      r.BestBy,
 			"passed":      passed,
 			"roundDouble": r.RoundDouble,
+			"stayed":      stayed,
 
 			"cutPeek": cutPeek,
 
-			"turn":     r.Turn,
-			"trump":    r.Trump,
-			"lead":     r.Lead,
-			"trick":    trick,
-			"you":      r.Hands[to.seat], // private hand
-			"counts":   counts,
-			"started":  r.Started,
-			"handOver": r.HandOver,
-			"names":    names,
-			"seat":     to.seat,
+			"turn":        r.Turn,
+			"trump":       r.Trump,
+			"lead":        r.Lead,
+			"trick":       trick,
+			"you":         r.Hands[to.seat],
+			"counts":      counts,
+			"talon":       len(r.stock),
+			"swamp":       len(r.swamp),
+			"exchangeMax": r.exchangeMax,
+			"started":     r.Started,
+			"handOver":    r.HandOver,
+			"names":       names,
+			"seat":        to.seat,
 		},
 	}
 	b, _ := json.Marshal(msg)
@@ -845,7 +971,3 @@ func (h *Hub) broadcastState(r *Room) {
 		h.sendStateTo(cl, r)
 	}
 }
-
-// ----------------------------- Errors -----------------------------
-
-var ErrBadState = errors.New("bad state")
