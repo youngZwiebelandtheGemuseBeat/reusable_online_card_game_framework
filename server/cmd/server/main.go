@@ -10,13 +10,10 @@ import (
 )
 
 func main() {
-	// --- config (envs) ---
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	// Comma-separated allow list of browser Origins.
-	// Example: WS_ALLOW_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 	allowCSV := os.Getenv("WS_ALLOW_ORIGINS")
 	var allow []string
 	if allowCSV != "" {
@@ -27,7 +24,6 @@ func main() {
 			}
 		}
 	} else {
-		// sensible dev defaults
 		allow = []string{
 			"http://localhost:5173",
 			"http://127.0.0.1:5173",
@@ -36,22 +32,17 @@ func main() {
 		}
 	}
 
-	// --- hub + routes ---
 	hub := ws.NewHub(allow)
-
 	mux := http.NewServeMux()
 
-	// WebSocket endpoint
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		hub.ServeWS(w, r)
 	})
 
-	// Health check / quick sanity
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// Minimal root info so you see something in browser
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("Reusable Card Game Server running. WebSocket at /ws\n"))
 	})

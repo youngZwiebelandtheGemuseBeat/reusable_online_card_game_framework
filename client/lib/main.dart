@@ -164,8 +164,8 @@ class _TablePageState extends State<TablePage> {
   int? turn;
   int? dealer;
   int? firstBidder;
-  String? phase;           // start | cut | bidding | pick_trump | play
-  int? actor;              // whose turn to act (bidding or start)
+  String? phase;           // start | cut | bidding | pick_trump | exchange | play
+  int? actor;              // whose turn to act (start/bidding/exchange)
   int? bestBid;
   int? bestBy;
   List<int> passed = [];
@@ -180,6 +180,14 @@ class _TablePageState extends State<TablePage> {
   List<Map<String, dynamic>> trick = [];
   List<String> names = [];
   List<int> counts = [];
+  List<int> stayed = [];
+
+  int talon = 0;
+  int swamp = 0;
+  int exchangeMax = 3;
+
+  // exchange UI state
+  final Set<int> _sel = {};
 
   final chatCtrl = TextEditingController();
   final List<String> chat = [];
@@ -215,6 +223,16 @@ class _TablePageState extends State<TablePage> {
               trick = ((m['m']['trick'] as List?) ?? const []).map((e) => Map<String, dynamic>.from((e as Map).map((k, v) => MapEntry(k.toString(), v)))).toList();
               names = ((m['m']['names'] as List?) ?? const []).map((e) => (e ?? '').toString()).toList();
               counts = ((m['m']['counts'] as List?) ?? const []).map((e) => (e as num).toInt()).toList();
+
+              stayed = ((m['m']['stayed'] as List?) ?? const []).map((e) => (e as num).toInt()).toList();
+              talon = ((m['m']['talon'] as num?) ?? 0).toInt();
+              swamp = ((m['m']['swamp'] as num?) ?? 0).toInt();
+              exchangeMax = ((m['m']['exchangeMax'] as num?) ?? 3).toInt();
+
+              // reset selection when phase/actor changes
+              if (phase != 'exchange' || seat != actor) {
+                _sel.clear();
+              }
             });
           }
           break;
@@ -250,10 +268,47 @@ class _TablePageState extends State<TablePage> {
   void _bid(int n) => widget.ws.send({"t":"bid","m":{"room": widget.roomId, "seat": seat, "bid": n}});
   void _pickTrump(String t) => widget.ws.send({"t":"pick_trump","m":{"room": widget.roomId, "seat": seat, "trump": t}});
 
+  void _toggleSel(int i) {
+    if (phase != 'exchange' || seat != actor) return;
+    if (_sel.contains(i)) {
+      setState(() => _sel.remove(i));
+    } else {
+      if (_sel.length < exchangeMax) {
+        setState(() => _sel.add(i));
+      }
+    }
+  }
+  void _stayHome() {
+    widget.ws.send({"t":"stay_home","m":{"room": widget.roomId, "seat": seat}});
+  }
+  void _exchangeSelected() {
+    final list = _sel.toList()..sort();
+    final cards = <Map<String, String>>[];
+    for (final i in list) {
+      if (i >= 0 && i < hand.length) {
+        final c = hand[i] as Map;
+        final suit = (c['Suit'] ?? c['suit'] ?? '').toString();
+        final rank = (c['Rank'] ?? c['rank'] ?? '').toString();
+        cards.add({"Suit": suit, "Rank": rank});
+      }
+    }
+    if (cards.isNotEmpty && cards.length <= exchangeMax) {
+      widget.ws.send({"t":"exchange","m":{"room": widget.roomId, "seat": seat, "cards": cards}});
+      setState(() => _sel.clear());
+    }
+  }
+
+  bool _stayedSeat(int s) => stayed.contains(s);
+
   @override
   Widget build(BuildContext context) {
     final myPlayTurn = phase == 'play' && seat != null && turn != null && seat == turn;
     final seatsCount = counts.isNotEmpty ? counts.length : math.max(names.length, 0);
+
+    final youAreActor = (seat != null && actor != null && seat == actor);
+    final declarer = bestBy;
+
+    final canStayHome = (trump != 'clubs') && (seat != declarer);
 
     return Scaffold(
       appBar: AppBar(
@@ -270,11 +325,11 @@ class _TablePageState extends State<TablePage> {
           Text('Seat: ${seat ?? "-"}  |  Turn: ${turn ?? "-"}  |  Trump: ${trump ?? "-"}  |  Lead: ${lead ?? "-"}  |  Double: ${roundDouble ? "yes" : "no"}'),
           const SizedBox(height: 12),
 
-          SizedBox(height: 280, child: PlayerRing(seats: seatsCount > 0 ? seatsCount : 3, names: names, counts: counts, youSeat: seat, turnSeat: turn)),
+          SizedBox(height: 280, child: PlayerRing(seats: seatsCount > 0 ? seatsCount : 3, names: names, counts: counts, youSeat: seat, turnSeat: turn, stayed: stayed)),
 
           const Divider(),
 
-          // ------- START phase: first bidder decides to Knock or Cut -------
+          // ------- START phase -------
           if (phase == 'start') ...[
             Card(
               elevation: 0,
@@ -299,7 +354,7 @@ class _TablePageState extends State<TablePage> {
             const SizedBox(height: 8),
           ],
 
-          // ------- CUT phase (after choice above; cutter sees bottom card) -------
+          // ------- CUT phase -------
           if (phase == 'cut') ...[
             if (seat == firstBidder && cutPeek != null)
               Card(
@@ -328,7 +383,7 @@ class _TablePageState extends State<TablePage> {
             const SizedBox(height: 8),
           ],
 
-          // ------- BIDDING -------
+          // ------- BIDDING + TRUMP PICK -------
           if (phase == 'bidding' || phase == 'pick_trump') ...[
             if (phase == 'bidding')
               Card(
@@ -381,6 +436,49 @@ class _TablePageState extends State<TablePage> {
             const Divider(),
           ],
 
+          // ------- EXCHANGE -------
+          if (phase == 'exchange') ...[
+            Row(children: [
+              Expanded(child: Text(youAreActor ? 'Your exchange' : 'Waiting for s${actor ?? "-"} to exchange')),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: Text('Talon: $talon'),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: Text('Swamp: $swamp'),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            if (youAreActor) Row(children: [
+              if (seat != bestBy && trump != 'clubs')
+                OutlinedButton.icon(onPressed: _stayHome, icon: const Icon(Icons.door_front_door), label: const Text('Stay home')),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: _sel.isNotEmpty && _sel.length <= exchangeMax ? _exchangeSelected : null,
+                icon: const Icon(Icons.swap_horiz),
+                label: Text('Exchange selected (${_sel.length}/$exchangeMax)'),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            const Text('Select cards to exchange:'),
+            Wrap(
+              spacing: 8, runSpacing: 8,
+              children: List.generate(hand.length, (i) {
+                final c = hand[i] as Map;
+                final suit = (c['Suit'] ?? c['suit'] ?? '?').toString();
+                final rank = (c['Rank'] ?? c['rank'] ?? '?').toString();
+                final selected = _sel.contains(i);
+                return FilterChip(
+                  selected: selected,
+                  onSelected: youAreActor ? (_) => _toggleSel(i) : null,
+                  label: Text('$rank-$suit'),
+                );
+              }),
+            ),
+            const Divider(),
+          ],
+
           // ------- PLAY -------
           if (phase == 'play') ...[
             const Text('On table (current trick):'),
@@ -400,8 +498,9 @@ class _TablePageState extends State<TablePage> {
               children: hand.map<Widget>((c) {
                 final suit = (c['Suit'] ?? c['suit'] ?? '?').toString();
                 final rank = (c['Rank'] ?? c['rank'] ?? '?').toString();
+                final stayedMe = seat != null && _stayedSeat(seat!);
                 return OutlinedButton(
-                  onPressed: (myPlayTurn && !handOver) ? () {
+                  onPressed: (myPlayTurn && !handOver && !stayedMe) ? () {
                     widget.ws.send({"t":"move","m":{"room": widget.roomId, "seat": seat, "type":"play_card", "card":{"Suit": suit, "Rank": rank}}});
                   } : null,
                   child: Text('$rank-$suit'),
@@ -443,7 +542,10 @@ class PlayerRing extends StatelessWidget {
   final List<int> counts;
   final int? youSeat;
   final int? turnSeat;
-  const PlayerRing({super.key, required this.seats, required this.names, required this.counts, this.youSeat, this.turnSeat});
+  final List<int> stayed;
+  const PlayerRing({super.key, required this.seats, required this.names, required this.counts, this.youSeat, this.turnSeat, required this.stayed});
+
+  bool _stayed(int s) => stayed.contains(s);
 
   @override
   Widget build(BuildContext context) {
@@ -462,20 +564,24 @@ class PlayerRing extends StatelessWidget {
         final cnt = (s < counts.length) ? counts[s] : 0;
         final isYou = (youSeat != null && youSeat == s);
         final isTurn = (turnSeat == s);
+        final isHome = _stayed(s);
 
         children.add(Positioned(
-          left: x - 64, top: y - 30, width: 128,
+          left: x - 72, top: y - 34, width: 144,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
-              color: isTurn ? Colors.yellow.withOpacity(0.25) : Colors.white,
+              color: isHome ? Colors.grey.shade200 : (isTurn ? Colors.yellow.withOpacity(0.25) : Colors.white),
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: isTurn ? Colors.amber : (isYou ? Colors.blue : Colors.black12), width: isTurn ? 3 : (isYou ? 2 : 1)),
+              border: Border.all(
+                color: isTurn ? Colors.amber : (isYou ? Colors.blue : Colors.black12),
+                width: isTurn ? 3 : (isYou ? 2 : 1),
+              ),
               boxShadow: isTurn ? [const BoxShadow(blurRadius: 10, spreadRadius: 1, color: Colors.amberAccent)] : null,
             ),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Text(name + (isYou ? '  (You)' : ''), overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: isTurn ? FontWeight.w700 : FontWeight.w500)),
+              Text(name + (isYou ? '  (You)' : '') + (isHome ? '  (Home)' : ''), overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: isTurn ? FontWeight.w700 : FontWeight.w500)),
               Text('cards: $cnt', style: const TextStyle(fontSize: 12)),
             ]),
           ),
